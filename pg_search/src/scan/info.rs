@@ -116,6 +116,8 @@ pub struct ScanInfo {
     /// - Use `SortPreservingMergeExec` to merge sorted segment streams
     /// - Enable sort-merge joins when both sides are sorted on join keys
     pub sort_order: Option<SortByField>,
+    /// The partitioning configuration of the BM25 index, if it was created with `partition_by`.
+    pub partition_by: Vec<crate::api::FieldName>,
     /// Estimated number of rows matching the query.
     /// Used to decide which table to partition in parallel joins.
     pub estimate: RowEstimate,

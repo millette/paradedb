@@ -199,7 +199,7 @@ fn cstr_to_rust_str(value: *const std::os::raw::c_char) -> String {
         .to_string()
 }
 
-const NUM_REL_OPTS: usize = 14;
+const NUM_REL_OPTS: usize = 15;
 #[pg_guard]
 pub unsafe extern "C-unwind" fn amoptions(
     reloptions: pg_sys::Datum,
@@ -305,6 +305,13 @@ pub unsafe extern "C-unwind" fn amoptions(
             #[cfg(feature = "pg18")]
             isset_offset: 0,
         },
+        pg_sys::relopt_parse_elt {
+            optname: "partition_by".as_pg_cstr(),
+            opttype: pg_sys::relopt_type::RELOPT_TYPE_STRING,
+            offset: std::mem::offset_of!(BM25IndexOptionsData, partition_by_offset) as i32,
+            #[cfg(feature = "pg18")]
+            isset_offset: 0,
+        },
     ];
     build_relopts(reloptions, validate, options)
 }
@@ -402,6 +409,10 @@ impl BM25IndexOptions {
     /// - Otherwise: returns parsed sort fields
     pub fn sort_by(&self) -> Vec<SortByField> {
         self.options_data().sort_by()
+    }
+
+    pub fn partition_by(&self) -> Vec<FieldName> {
+        self.options_data().partition_by()
     }
 
     pub fn search_tokenizer(&self) -> Option<SearchTokenizer> {
@@ -681,6 +692,7 @@ struct BM25IndexOptionsData {
     mutable_segment_rows: i32,
     sort_by_offset: i32,
     search_tokenizer_offset: i32,
+    partition_by_offset: i32,
 }
 
 impl BM25IndexOptionsData {
@@ -746,6 +758,18 @@ impl BM25IndexOptionsData {
             )];
         }
         parse_sort_by_string(&sort_by_str)
+    }
+
+    pub fn partition_by(&self) -> Vec<FieldName> {
+        let pb_str = self.get_str(self.partition_by_offset, "".to_string());
+        if pb_str.is_empty() {
+            vec![]
+        } else {
+            pb_str
+                .split(',')
+                .map(|s| FieldName::from(s.trim().to_string()))
+                .collect()
+        }
     }
 
     pub fn search_tokenizer(&self) -> Option<SearchTokenizer> {

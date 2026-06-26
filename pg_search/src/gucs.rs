@@ -223,6 +223,10 @@ static TERM_SET_BITSET_MAX_DENSITY_UNIQUE: GucSetting<f64> = GucSetting::<f64>::
 /// `tantivy::query::TermSetStrategyConfig::default()`.
 static TERM_SET_BITSET_MAX_DENSITY_MULTI: GucSetting<f64> = GucSetting::<f64>::new(1.0 / 200.0);
 
+/// Hardcoded boundaries for M1 range partitioning spike
+static RANGE_PARTITION_BOUNDARIES: GucSetting<Option<std::ffi::CString>> =
+    GucSetting::<Option<std::ffi::CString>>::new(None);
+
 pub fn init() {
     // Note that Postgres is very specific about the naming convention of variables.
     // They must be namespaced... we use 'paradedb.<variable>' below.
@@ -640,6 +644,15 @@ pub fn init() {
         GucContext::Userset,
         GucFlags::UNIT_BYTE,
     );
+
+    GucRegistry::define_string_guc(
+        c"paradedb.range_partition_boundaries",
+        c"Hardcoded boundaries for M1 range partitioning spike",
+        c"Comma-separated list of integers",
+        &RANGE_PARTITION_BOUNDARIES,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
 }
 
 pub fn enable_custom_scan() -> bool {
@@ -796,6 +809,12 @@ pub fn explain_recursive_estimates() -> bool {
 
 pub fn check_topk_scan() -> bool {
     CHECK_TOPK_SCAN.get()
+}
+
+pub fn range_partition_boundaries() -> Option<String> {
+    RANGE_PARTITION_BOUNDARIES
+        .get()
+        .map(|cstr| cstr.to_string_lossy().into_owned())
 }
 
 pub fn enable_heuristic_selectivity() -> bool {

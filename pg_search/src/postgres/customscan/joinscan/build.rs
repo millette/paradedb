@@ -344,6 +344,7 @@ pub struct JoinSourceCandidate {
     pub score_needed: bool,
     pub fields: Vec<FieldInfo>,
     pub sort_order: Option<SortByField>,
+    pub partition_by: Vec<crate::api::FieldName>,
     pub estimate: Option<RowEstimate>,
     pub segment_count: Option<usize>,
     pub estimated_rows_per_worker: Option<u64>,
@@ -362,6 +363,7 @@ impl JoinSourceCandidate {
             score_needed: false,
             fields: Vec::new(),
             sort_order: None,
+            partition_by: Vec::new(),
             estimate: None,
             segment_count: None,
             estimated_rows_per_worker: None,
@@ -395,6 +397,11 @@ impl JoinSourceCandidate {
 
     pub fn with_sort_order(mut self, sort_order: Option<SortByField>) -> Self {
         self.sort_order = sort_order;
+        self
+    }
+
+    pub fn with_partition_by(mut self, partition_by: Vec<crate::api::FieldName>) -> Self {
+        self.partition_by = partition_by;
         self
     }
 
@@ -584,6 +591,7 @@ impl TryFrom<JoinSourceCandidate> for JoinSource {
                 score_needed: candidate.score_needed,
                 fields: candidate.fields,
                 sort_order: candidate.sort_order,
+                partition_by: candidate.partition_by,
                 estimate: candidate.estimate.ok_or_else(|| {
                     anyhow!(
                         "cannot build JoinSource for RTI {}: estimate is missing",
