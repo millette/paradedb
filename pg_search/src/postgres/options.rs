@@ -962,6 +962,14 @@ pub unsafe fn init() {
         Some(validate_search_tokenizer),
         pg_sys::AccessExclusiveLock as pg_sys::LOCKMODE,
     );
+    pg_sys::add_string_reloption(
+        RELOPT_KIND_PDB,
+        "partition_by".as_pg_cstr(),
+        "Comma-separated list of fields to partition index data by".as_pg_cstr(),
+        std::ptr::null(),
+        None,
+        pg_sys::AccessExclusiveLock as pg_sys::LOCKMODE,
+    );
 }
 
 /// As a SearchFieldConfig is an enum, for it to be correctly serialized the variant needs

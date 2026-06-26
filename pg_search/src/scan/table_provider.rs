@@ -500,6 +500,7 @@ impl PgSearchTableProvider {
             ffhelper_arg,
             self.scan_info.indexrelid.to_u32(),
             deferred_ctid_plan_position,
+            &self.scan_info.partition_by,
         )))
     }
 

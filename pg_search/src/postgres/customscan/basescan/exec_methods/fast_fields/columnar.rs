@@ -437,6 +437,7 @@ impl ColumnarExecState {
             None,
             index_rel.oid().to_u32(),
             None,
+            &[],
         );
 
         let task_ctx = Arc::new(TaskContext::default());

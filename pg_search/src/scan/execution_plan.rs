@@ -193,6 +193,8 @@ pub struct PgSearchScanPlan {
     /// this scan to write a tag — the EXPLAIN renderer falls back to
     /// `=true` in that case.
     dynamic_filter_strategy: Arc<AtomicU8>,
+    partition_by: Vec<crate::api::FieldName>,
+    partition_filters: Vec<Vec<Arc<dyn PhysicalExpr>>>,
 }
 
 impl std::fmt::Debug for PgSearchScanPlan {
@@ -223,6 +225,7 @@ impl PgSearchScanPlan {
         ffhelper: Option<Arc<FFHelper>>,
         indexrelid: u32,
         deferred_ctid_plan_position: Option<usize>,
+        partition_by: &[crate::api::FieldName],
     ) -> Self {
         let needs_ffhelper = !deferred_fields.is_empty() || deferred_ctid_plan_position.is_some();
         if needs_ffhelper && ffhelper.is_none() {
@@ -230,13 +233,155 @@ impl PgSearchScanPlan {
         }
         // Ensure we always return at least one partition to satisfy DataFusion distribution
         // requirements (e.g. HashJoinExec mode=CollectLeft requires SinglePartition).
-        // If states is empty, execute() will return an EmptyStream for this single partition.
-        let partition_count = states.len().max(1);
-        let eq_properties = build_equivalence_properties(schema, sort_order);
+        // If states is empty, execute() will return an EmptyStream for this single partition
+        let mut states = states;
+        let mut partition_count = states.len().max(1);
+        let eq_properties = build_equivalence_properties(schema.clone(), sort_order);
+
+        let mut partitioning = Partitioning::UnknownPartitioning(partition_count);
+        let mut partition_filters: Vec<Vec<Arc<dyn PhysicalExpr>>> = vec![vec![]; partition_count];
+
+        if !partition_by.is_empty() {
+            if let Some(boundaries_str) = crate::gucs::range_partition_boundaries() {
+                let mut split_points_vals = Vec::new();
+                for b in boundaries_str.split(',') {
+                    let b = b.trim();
+                    if !b.is_empty() {
+                        if let Ok(val) = b.parse::<i64>() {
+                            split_points_vals.push(val);
+                        }
+                    }
+                }
+
+                let target_partitions = split_points_vals.len() + 1;
+
+                // If the input states are Eager scans, we can combine all segments into a single
+                // Eager scan recipe and duplicate it across the target number of partitions!
+                if target_partitions > 1
+                    && !states.is_empty()
+                    && matches!(
+                        states[0].recipe,
+                        crate::scan::execution_plan::ScanRecipe::Eager { .. }
+                    )
+                {
+                    let mut all_segments = Vec::new();
+                    let mut scanner_config = None;
+                    for state in &states {
+                        if let crate::scan::execution_plan::ScanRecipe::Eager {
+                            segment_ids,
+                            scanner_config: sc,
+                        } = &state.recipe
+                        {
+                            all_segments.extend(segment_ids.iter().copied());
+                            scanner_config = Some(sc.clone());
+                        }
+                    }
+                    if let Some(scanner_config) = scanner_config {
+                        let base_state = &states[0];
+                        let mut new_states = Vec::with_capacity(target_partitions);
+                        for _ in 0..target_partitions {
+                            new_states.push(ScanState {
+                                recipe: crate::scan::execution_plan::ScanRecipe::Eager {
+                                    segment_ids: all_segments.clone(),
+                                    scanner_config: scanner_config.clone(),
+                                },
+                                ffhelper: base_state.ffhelper.clone(),
+                                visibility: base_state.visibility.clone(),
+                                reader: base_state.reader.clone(),
+                            });
+                        }
+                        states = new_states;
+                        partition_count = target_partitions;
+                        partitioning = Partitioning::UnknownPartitioning(partition_count);
+                        partition_filters = vec![vec![]; partition_count];
+                    }
+                }
+
+                if !split_points_vals.is_empty() && partition_count == split_points_vals.len() + 1 {
+                    let field_name = partition_by[0].to_string();
+                    if let Ok(col_expr) =
+                        datafusion::physical_expr::expressions::Column::new_with_schema(
+                            &field_name,
+                            schema.as_ref(),
+                        )
+                    {
+                        let data_type = col_expr
+                            .data_type(schema.as_ref())
+                            .unwrap_or(datafusion::arrow::datatypes::DataType::Int64);
+                        let make_scalar = |v: i64| {
+                            if data_type == datafusion::arrow::datatypes::DataType::Int32 {
+                                datafusion::common::ScalarValue::Int32(Some(v as i32))
+                            } else {
+                                datafusion::common::ScalarValue::Int64(Some(v))
+                            }
+                        };
+
+                        let col_expr_arc = Arc::new(col_expr.clone()) as Arc<dyn PhysicalExpr>;
+                        let sort_expr = PhysicalSortExpr {
+                            expr: col_expr_arc.clone(),
+                            options: SortOptions {
+                                descending: false,
+                                nulls_first: false,
+                            },
+                        };
+                        if let Some(lex_ordering) = LexOrdering::new(vec![sort_expr]) {
+                            let mut split_points = Vec::new();
+                            for &val in &split_points_vals {
+                                split_points.push(datafusion::common::SplitPoint::new(vec![
+                                    make_scalar(val),
+                                ]));
+                            }
+                            partitioning = Partitioning::Range(
+                                datafusion::physical_expr::RangePartitioning::new(
+                                    lex_ordering,
+                                    split_points,
+                                ),
+                            );
+
+                            // Build the partition filters
+                            for i in 0..partition_count {
+                                let mut p_filters = Vec::new();
+                                if i > 0 {
+                                    let lower = split_points_vals[i - 1];
+                                    let lower_val =
+                                        datafusion::physical_expr::expressions::Literal::new(
+                                            make_scalar(lower),
+                                        );
+                                    p_filters.push(Arc::new(
+                                        datafusion::physical_expr::expressions::BinaryExpr::new(
+                                            col_expr_arc.clone(),
+                                            datafusion::logical_expr::Operator::GtEq,
+                                            Arc::new(lower_val),
+                                        ),
+                                    )
+                                        as Arc<dyn PhysicalExpr>);
+                                }
+                                if i < split_points_vals.len() {
+                                    let upper = split_points_vals[i];
+                                    let upper_val =
+                                        datafusion::physical_expr::expressions::Literal::new(
+                                            make_scalar(upper),
+                                        );
+                                    p_filters.push(Arc::new(
+                                        datafusion::physical_expr::expressions::BinaryExpr::new(
+                                            col_expr_arc.clone(),
+                                            datafusion::logical_expr::Operator::Lt,
+                                            Arc::new(upper_val),
+                                        ),
+                                    )
+                                        as Arc<dyn PhysicalExpr>);
+                                }
+                                partition_filters[i] = p_filters;
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         let properties = Arc::new(PlanProperties::new(
             eq_properties,
-            Partitioning::UnknownPartitioning(partition_count),
+            partitioning,
             EmissionType::Incremental,
             Boundedness::Bounded,
         ));
@@ -278,6 +423,8 @@ impl PgSearchScanPlan {
             dynamic_filter_pushdown: Arc::new(AtomicBool::new(false)),
             sort_order: sort_order.cloned(),
             dynamic_filter_strategy: Arc::new(AtomicU8::new(0)),
+            partition_by: partition_by.to_vec(),
+            partition_filters,
         }
     }
 
@@ -478,6 +625,7 @@ impl PgSearchScanPlan {
             ffhelper_arg,
             descriptor.indexrelid,
             deferred_ctid_plan_position,
+            &[],
         )))
     }
 }
@@ -690,6 +838,11 @@ impl ExecutionPlan for PgSearchScanPlan {
         // Capture self-references for the async block
         let dynamic_filter_pushdown = self.dynamic_filter_pushdown.clone();
         let dynamic_filter_strategy = self.dynamic_filter_strategy.clone();
+        let partition_filters = self
+            .partition_filters
+            .get(partition)
+            .cloned()
+            .unwrap_or_default();
 
         let stream_gen = async_stream::try_stream! {
             // Optimized Search Integration:
@@ -697,6 +850,7 @@ impl ExecutionPlan for PgSearchScanPlan {
             // this block is evaluated lazily during the first `poll_next`, which happens
             // AFTER the build side has completed and dynamic filters are published.
             let mut dynamic_filters = dynamic_filters.clone();
+            dynamic_filters.extend(partition_filters.clone());
             if !dynamic_filters.is_empty()
                 && try_dynamic_filter_pushdown(
                     &mut reader,
@@ -857,6 +1011,8 @@ impl ExecutionPlan for PgSearchScanPlan {
                 dynamic_filter_strategy: Arc::new(AtomicU8::new(
                     self.dynamic_filter_strategy.load(Ordering::Relaxed),
                 )),
+                partition_by: self.partition_by.clone(),
+                partition_filters: self.partition_filters.clone(),
             });
             Ok(
                 FilterPushdownPropagation::with_parent_pushdown_result(filters)
@@ -966,6 +1122,7 @@ pub fn create_sorted_scan(
         None,
         indexrelid,
         None,
+        &[],
     ));
 
     // For a single segment, no merging is needed
@@ -1021,6 +1178,7 @@ mod tests {
             None,
             0,
             Some(1),
+            &[],
         );
     }
 
@@ -1035,6 +1193,7 @@ mod tests {
             None,
             0,
             None,
+            &[],
         );
     }
 }
