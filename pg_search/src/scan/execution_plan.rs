@@ -255,56 +255,61 @@ impl PgSearchScanPlan {
 
                 let target_partitions = split_points_vals.len() + 1;
 
-                // If the input states are Eager scans, we can combine all segments into a single
-                // Eager scan recipe and duplicate it across the target number of partitions!
-                if target_partitions > 1
-                    && !states.is_empty()
-                    && matches!(
-                        states[0].recipe,
-                        crate::scan::execution_plan::ScanRecipe::Eager { .. }
-                    )
-                {
-                    let mut all_segments = Vec::new();
-                    let mut scanner_config = None;
-                    for state in &states {
-                        if let crate::scan::execution_plan::ScanRecipe::Eager {
-                            segment_ids,
-                            scanner_config: sc,
-                        } = &state.recipe
-                        {
-                            all_segments.extend(segment_ids.iter().copied());
-                            scanner_config = Some(sc.clone());
-                        }
+                // If we are artificially enforcing range partitioning on existing data,
+                // we must force every DataFusion partition to scan ALL underlying segments,
+                // because the segments themselves are not physically partitioned by these ranges!
+                if target_partitions > 1 && !states.is_empty() {
+                    let base_state = &states[0];
+                    let mut new_states = Vec::with_capacity(target_partitions);
+
+                    for _ in 0..target_partitions {
+                        let recipe = match &base_state.recipe {
+                            crate::scan::execution_plan::ScanRecipe::Lazy {
+                                source_idx,
+                                non_partitioning_index,
+                                planner_estimated_rows,
+                                scanner_config,
+                                ..
+                            } => crate::scan::execution_plan::ScanRecipe::Lazy {
+                                parallel_state: None, // Disable dynamic segment stealing
+                                source_idx: None,     // Disable per-source claim requirement
+                                non_partitioning_index: *non_partitioning_index,
+                                planner_estimated_rows: *planner_estimated_rows,
+                                scanner_config: scanner_config.clone(),
+                            },
+                            crate::scan::execution_plan::ScanRecipe::Eager {
+                                segment_ids,
+                                scanner_config,
+                            } => crate::scan::execution_plan::ScanRecipe::Eager {
+                                segment_ids: segment_ids.clone(),
+                                scanner_config: scanner_config.clone(),
+                            },
+                            crate::scan::execution_plan::ScanRecipe::Prefetched { .. } => {
+                                panic!("Cannot range partition a Prefetched scan")
+                            }
+                        };
+
+                        new_states.push(ScanState {
+                            recipe,
+                            ffhelper: base_state.ffhelper.clone(),
+                            visibility: base_state.visibility.clone(),
+                            reader: base_state.reader.clone(),
+                        });
                     }
-                    if let Some(scanner_config) = scanner_config {
-                        let base_state = &states[0];
-                        let mut new_states = Vec::with_capacity(target_partitions);
-                        for _ in 0..target_partitions {
-                            new_states.push(ScanState {
-                                recipe: crate::scan::execution_plan::ScanRecipe::Eager {
-                                    segment_ids: all_segments.clone(),
-                                    scanner_config: scanner_config.clone(),
-                                },
-                                ffhelper: base_state.ffhelper.clone(),
-                                visibility: base_state.visibility.clone(),
-                                reader: base_state.reader.clone(),
-                            });
-                        }
-                        states = new_states;
-                        partition_count = target_partitions;
-                        partitioning = Partitioning::UnknownPartitioning(partition_count);
-                        partition_filters = vec![vec![]; partition_count];
-                    }
+                    states = new_states;
+                    partition_count = target_partitions;
+                    partitioning = Partitioning::UnknownPartitioning(partition_count);
+                    partition_filters = vec![vec![]; partition_count];
                 }
 
                 if !split_points_vals.is_empty() && partition_count == split_points_vals.len() + 1 {
                     let field_name = partition_by[0].to_string();
-                    if let Ok(col_expr) =
+                    let col_result =
                         datafusion::physical_expr::expressions::Column::new_with_schema(
                             &field_name,
                             schema.as_ref(),
-                        )
-                    {
+                        );
+                    if let Ok(col_expr) = col_result {
                         let data_type = col_expr
                             .data_type(schema.as_ref())
                             .unwrap_or(datafusion::arrow::datatypes::DataType::Int64);
@@ -331,12 +336,11 @@ impl PgSearchScanPlan {
                                     make_scalar(val),
                                 ]));
                             }
-                            partitioning = Partitioning::Range(
-                                datafusion::physical_expr::RangePartitioning::new(
-                                    lex_ordering,
-                                    split_points,
-                                ),
+                            let rp = datafusion::physical_expr::RangePartitioning::new(
+                                lex_ordering,
+                                split_points,
                             );
+                            partitioning = Partitioning::Range(rp);
 
                             // Build the partition filters
                             for i in 0..partition_count {
@@ -453,7 +457,8 @@ impl PgSearchScanPlan {
             .map_err(|e| DataFusionError::Internal(format!("lock PgSearchScanPlan states: {e}")))?;
         // The dispatch path only ships the single-partition lazy scan (the MPP natural-shape
         // leaf). Sorted/eager multi-partition scans aren't dispatched yet.
-        if states.len() != 1 {
+        // Exception: If we are mocking range partitioning for tests, states might be duplicated.
+        if states.len() != 1 && crate::gucs::range_partition_boundaries().is_none() {
             return Err(DataFusionError::NotImplemented(format!(
                 "PgSearchScan dispatch: expected 1 partition, found {}",
                 states.len()

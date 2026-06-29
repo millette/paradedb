@@ -343,7 +343,10 @@ pub fn build_base_session(config: SessionConfig) -> SessionStateBuilder {
 /// - [`SessionContextProfile::Aggregate`]: appends a single `FilterPushdown`
 ///   post-pass; SegmentedTopK does not apply to aggregate-on-join queries.
 pub fn create_datafusion_session_context(profile: SessionContextProfile) -> SessionContext {
-    let mut config = SessionConfig::new().with_target_partitions(1);
+    // For the spike, use mpp_worker_count as target_partitions even in local execution
+    // so we can observe partitioned plans locally.
+    let target_partitions = crate::gucs::mpp_worker_count().max(1) as usize;
+    let mut config = SessionConfig::new().with_target_partitions(target_partitions);
 
     // Configure dynamic filter pushdown thresholds from our GUCs
     config
@@ -362,6 +365,17 @@ pub fn create_datafusion_session_context(profile: SessionContextProfile) -> Sess
         .optimizer
         .hash_join_inlist_pushdown_max_distinct_values =
         crate::gucs::hash_join_inlist_pushdown_max_distinct_values() as usize;
+
+    // Disable CollectLeft heuristics for the spike so we can observe Partitioned joins
+    // even on small test datasets.
+    config
+        .options_mut()
+        .optimizer
+        .hash_join_single_partition_threshold = 0;
+    config
+        .options_mut()
+        .optimizer
+        .hash_join_single_partition_threshold_rows = 0;
 
     if matches!(profile, SessionContextProfile::Join) {
         config

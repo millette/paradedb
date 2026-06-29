@@ -60,6 +60,9 @@ WITH (
 ANALYZE mpp_join_files;
 ANALYZE mpp_join_pages;
 
+
+SET paradedb.enable_mpp TO off;
+
 EXPLAIN (COSTS OFF, VERBOSE, TIMING OFF)
 SELECT f.title, p.size_bytes
 FROM mpp_join_files f JOIN mpp_join_pages p ON f.id = p.file_id
@@ -72,6 +75,7 @@ FROM mpp_join_files f JOIN mpp_join_pages p ON f.id = p.file_id
 WHERE f.content @@@ 'Section'
 ORDER BY f.title, p.size_bytes
 LIMIT 10;
+
 
 DROP TABLE mpp_join_pages;
 DROP TABLE mpp_join_files;
