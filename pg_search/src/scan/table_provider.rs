@@ -877,6 +877,11 @@ impl PgSearchTableProvider {
                 panic!("PgSearchTableProvider requires `estimated_rows_per_worker` to be explicitly set during planning");
             });
 
+            // SPIKE NOTE: `parallel_state` is normally propagated directly into the `ScanRecipe::Lazy`
+            // inside `create_lazy_scan`, allowing the scan to dynamically checkout segments from shared
+            // memory (if it's not None). During the M1 spike, the `PgSearchScanPlan` intercepts this
+            // downstream and nulls out the `parallel_state` when it duplicates states for range partitioning,
+            // effectively replacing the dynamic behavior with static segment assignment.
             self.create_lazy_scan(
                 parallel_state,
                 &reader,

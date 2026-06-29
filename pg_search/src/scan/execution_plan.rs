@@ -271,7 +271,10 @@ impl PgSearchScanPlan {
                                 scanner_config,
                                 ..
                             } => crate::scan::execution_plan::ScanRecipe::Lazy {
-                                parallel_state: None, // Disable dynamic segment stealing
+                                // SPIKE HACK: We deliberately stop pushing down the parallel_state here
+                                // to disable dynamic segment stealing. We want each partition to scan all
+                                // of its segments directly. This is temporary for the M1 spike.
+                                parallel_state: None,
                                 source_idx: *source_idx,
                                 non_partitioning_index: *non_partitioning_index,
                                 planner_estimated_rows: *planner_estimated_rows,

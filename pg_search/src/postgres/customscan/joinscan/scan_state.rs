@@ -366,8 +366,9 @@ pub fn create_datafusion_session_context(profile: SessionContextProfile) -> Sess
         .hash_join_inlist_pushdown_max_distinct_values =
         crate::gucs::hash_join_inlist_pushdown_max_distinct_values() as usize;
 
-    // Disable CollectLeft heuristics for the spike so we can observe Partitioned joins
-    // even on small test datasets.
+    // SPIKE HACK: Disable CollectLeft heuristics for the spike so we can observe Partitioned joins
+    // even on small test datasets. This forces DataFusion to evaluate the `Partitioning::Range` property.
+    // Temporary for the M1 spike.
     config
         .options_mut()
         .optimizer
