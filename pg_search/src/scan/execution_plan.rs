@@ -272,7 +272,7 @@ impl PgSearchScanPlan {
                                 ..
                             } => crate::scan::execution_plan::ScanRecipe::Lazy {
                                 parallel_state: None, // Disable dynamic segment stealing
-                                source_idx: None,     // Disable per-source claim requirement
+                                source_idx: *source_idx,
                                 non_partitioning_index: *non_partitioning_index,
                                 planner_estimated_rows: *planner_estimated_rows,
                                 scanner_config: scanner_config.clone(),
@@ -884,9 +884,7 @@ impl ExecutionPlan for PgSearchScanPlan {
                                 (Some(ps), idx) => {
                                     reader.search_lazy(ps, idx, planner_estimated_rows)
                                 }
-                                (None, Some(_)) => panic!(
-                                    "per-source claim needs `parallel_state` installed before recipe execution"
-                                ),
+                                (None, Some(_)) => reader.search(),
                                 (None, None) => reader.search(),
                             };
                             (res, scanner_config)

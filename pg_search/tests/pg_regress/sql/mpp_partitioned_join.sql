@@ -61,7 +61,7 @@ ANALYZE mpp_join_files;
 ANALYZE mpp_join_pages;
 
 
-SET paradedb.enable_mpp TO off;
+SET paradedb.enable_mpp TO on;
 
 EXPLAIN (COSTS OFF, VERBOSE, TIMING OFF)
 SELECT f.title, p.size_bytes
